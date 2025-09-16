@@ -14,6 +14,17 @@ Vagrant.configure("2") do |config|
   # boxes at https://vagrantcloud.com/search.
   config.vm.box = "bento/ubuntu-22.04"
   config.vm.box_version = "202508.03.0"
+  config.vm.provider :virtualbox
+  config.vm.disk :disk, size: "100GB", primary: true
+  config.vm.disk :disk, size: "100GB", name: "workspace-disk"
+
+
+  # Set VirtualBox disk size to 100GB (requires plugin: vagrant-disksize)
+  # if Vagrant.has_plugin?("vagrant-disksize")
+  #   config.disksize.size = "100GB"
+  # else
+  #   warn "[vagrant-disksize] plugin not installed. Run: vagrant plugin install vagrant-disksize"
+  # end
 
   # Disable automatic box update checking. If you disable this, then
   # boxes will only be checked for updates when the user runs
@@ -51,7 +62,7 @@ Vagrant.configure("2") do |config|
   # by making sure your Vagrantfile isn't accessible to the vagrant box.
   # If you use this you may want to enable additional shared subfolders as
   # shown above.
-  config.vm.synced_folder "./workspace", "/vagrant/workspace", disabled: false
+  # config.vm.synced_folder "./workspace", "/vagrant/workspace", disabled: false
 
   # Provider-specific configuration so you can fine-tune various
   # backing providers for Vagrant. These expose provider-specific options.
@@ -106,6 +117,56 @@ Vagrant.configure("2") do |config|
         echo "Added user 'vagrant' to docker group (relogin required)."
       fi
     fi
+
+    echo "[5b] Preparing and mounting secondary workspace disk (/home/vagrant/workspace)..."
+    # Ensure required tools are present
+    apt-get install -y parted e2fsprogs
+    DISK="/dev/sdb"
+    PART="${DISK}1"
+    MNT="/home/vagrant/workspace"
+    if [ -b "$DISK" ]; then
+      # Partition if not already partitioned
+      if ! lsblk -no NAME "$PART" >/dev/null 2>&1; then
+        parted -s "$DISK" mklabel gpt || true
+        parted -s "$DISK" mkpart primary ext4 0% 100% || true
+        # Wait for the kernel to recognize the new partition
+        udevadm settle || true
+      fi
+      # Make filesystem if missing
+      if [ -b "$PART" ] && [ -z "$(lsblk -no FSTYPE "$PART")" ]; then
+        mkfs.ext4 -F "$PART"
+      fi
+      # Mount point and fstab
+      mkdir -p "$MNT"
+      if [ -b "$PART" ]; then
+        UUID=$(blkid -s UUID -o value "$PART")
+        if [ -n "$UUID" ] && ! grep -q "$UUID" /etc/fstab; then
+          echo "UUID=$UUID $MNT ext4 defaults,nofail 0 2" >> /etc/fstab
+        fi
+        mount -a || true
+        chown -R vagrant:vagrant "$MNT" || true
+      fi
+    fi
+
+    echo "[5c] Configuring Docker data-root to $MNT/docker ..."
+    apt-get install -y rsync || true
+    mkdir -p /etc/docker
+    mkdir -p "$MNT/docker"
+    # If old data exists and target is empty, migrate once
+    if [ -d /var/lib/docker ] && [ -z "$(ls -A "$MNT/docker" 2>/dev/null)" ]; then
+      systemctl stop docker || true
+      rsync -a /var/lib/docker/ "$MNT/docker/" || true
+    else
+      systemctl stop docker || true
+    fi
+    printf '%s\n' \
+      '{' \
+      '  "data-root": "/home/vagrant/workspace/docker"' \
+      '}' \
+      > /etc/docker/daemon.json
+    chown -R root:root "$MNT/docker"
+    systemctl daemon-reload || true
+    systemctl enable --now docker || true
 
     # Ensure OpenSSH server is installed and enabled at boot
     apt-get install -y openssh-server
