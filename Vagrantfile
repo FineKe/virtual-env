@@ -107,6 +107,48 @@ Vagrant.configure("2") do |config|
       fi
     fi
 
+    # Ensure OpenSSH server is installed and enabled at boot
+    apt-get install -y openssh-server
+    systemctl enable --now ssh || true
+
+    # Auto-start ssh-agent for login shells (idempotent, per-user)
+    printf '%s\n' \
+      'if [ -z "$SSH_AUTH_SOCK" ]; then' \
+      '  AGENT_ENV="$HOME/.ssh/agent.env"' \
+      '  if [ -r "$AGENT_ENV" ]; then . "$AGENT_ENV" >/dev/null 2>&1; fi' \
+      '  if ! kill -0 "$SSH_AGENT_PID" >/dev/null 2>&1; then' \
+      '    eval "$(ssh-agent -s)" >/dev/null' \
+      '    mkdir -p "$HOME/.ssh"' \
+      '    umask 077' \
+      '    echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK; export SSH_AUTH_SOCK;" > "$AGENT_ENV"' \
+      '    echo "SSH_AGENT_PID=$SSH_AGENT_PID; export SSH_AGENT_PID;" >> "$AGENT_ENV"' \
+      '  fi' \
+      'fi' \
+      > /etc/profile.d/10-ssh-agent.sh
+    chmod 0644 /etc/profile.d/10-ssh-agent.sh
+
+    echo "[5a/7] Installing zsh and oh-my-zsh for vagrant..."
+    apt-get install -y zsh
+    # Install oh-my-zsh for vagrant user (unattended)
+    su - vagrant -c 'if [ ! -d "$HOME/.oh-my-zsh" ]; then \
+        export RUNZSH=no CHSH=no KEEP_ZSHRC=yes; \
+        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"; \
+      fi'
+    # Ensure .zshrc exists and set basic plugins
+    su - vagrant -c 'if [ ! -f "$HOME/.zshrc" ] && [ -d "$HOME/.oh-my-zsh" ]; then \
+        cp "$HOME/.oh-my-zsh/templates/zshrc.zsh-template" "$HOME/.zshrc"; \
+      fi'
+    su - vagrant -c 'if [ -f "$HOME/.zshrc" ]; then \
+        sed -i "s/^plugins=(.*/plugins=(git docker)/" "$HOME/.zshrc" || true; \
+        if ! grep -q "99-golang.sh" "$HOME/.zshrc"; then \
+          printf "\n# env from provisioning\n[ -f /etc/profile.d/99-golang.sh ] && source /etc/profile.d/99-golang.sh\n[ -f /etc/profile.d/99-rust.sh ] && source /etc/profile.d/99-rust.sh\n" >> "$HOME/.zshrc"; \
+        fi; \
+      fi'
+    # Set default shell to zsh for vagrant
+    if [ "$(getent passwd vagrant | cut -d: -f7)" != "/usr/bin/zsh" ]; then
+      chsh -s /usr/bin/zsh vagrant || usermod -s /usr/bin/zsh vagrant || true
+    fi
+
     echo "[5/7] Configuring DNS via systemd-resolved..."
     mkdir -p /etc/systemd/resolved.conf.d
     printf '%s\n' \
