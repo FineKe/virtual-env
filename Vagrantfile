@@ -101,14 +101,27 @@ Vagrant.configure("2") do |config|
     # Extra C/C++ toolchain utilities frequently used in projects
     apt-get install -y cmake ninja-build clang gdb pkg-config libssl-dev ccache
 
-    echo "[4/7] Installing Docker (if missing)..."
-    if ! command -v docker >/dev/null 2>&1; then
-      # Prefer Ubuntu docker.io for simplicity and reliability in VMs
-      apt-get install -y docker.io
-      systemctl enable --now docker
+    echo "[4/7] Installing Docker CE (official repo)..."
+    # If docker-ce not present, switch to official Docker APT and install latest stable
+    if ! dpkg -s docker-ce >/dev/null 2>&1; then
+      systemctl stop docker || true
+      apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd || true
+      apt-get purge -y docker.io || true
+      apt-get update -y
+
+      install -m 0755 -d /etc/apt/keyrings || true
+      if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      fi
+      UBUNTU_CODENAME=$( . /etc/os-release && echo "$UBUNTU_CODENAME" )
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $UBUNTU_CODENAME stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update -y
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     else
-      echo "Docker already installed: $(docker --version)"
+      echo "Docker CE already installed: $(docker --version)"
     fi
+    systemctl enable --now docker || true
 
     # Add vagrant user to docker group (idempotent)
     if getent passwd vagrant >/dev/null 2>&1; then
